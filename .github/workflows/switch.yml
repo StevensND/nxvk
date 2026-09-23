@@ -13,6 +13,11 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version. Leave it empty to avoid publishing a release.'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -73,10 +78,12 @@ jobs:
           make CONTAINER= "NINJA_ENV=$NINJA_ENV"
           EOF
 
+      # build-nro.sh links gl_* apps entirely out of cross-zink, so that tree also needs
+      # libnvk.a and the support archives, which `make gl` alone only builds in cross.
       - name: Build OpenGL stack (make gl)
         run: |
           docker run $DOCKER_ARGS -e NINJA_ENV "$IMAGE" bash -euo pipefail -s <<'EOF'
-          make gl CONTAINER= "NINJA_ENV=$NINJA_ENV"
+          make gl CONTAINER= "NINJA_ENV=$NINJA_ENV" 'GL_TARGETS=$(GL_LIBS) $(DRIVER_TARGETS)'
           EOF
 
       - name: Stage portlib
@@ -140,3 +147,33 @@ jobs:
             switch/build/cross/meson-logs/
             switch/build/cross-zink/meson-logs/
           if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package release assets
+        run: |
+          cd artifacts
+          (cd nxvk-portlib && zip -qr "../../nxvk-portlib-v${{ inputs.version }}.zip" .)
+          (cd nxvk-nros    && zip -qr "../../nxvk-nros-v${{ inputs.version }}.zip" .)
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ inputs.version }}"
+          name: "nxvk v${{ inputs.version }}"
+          files: |
+            nxvk-portlib-v${{ inputs.version }}.zip
+            nxvk-nros-v${{ inputs.version }}.zip
+          draft: false
+          prerelease: false
