@@ -6,7 +6,7 @@
 #
 # Outputs (artifacts):
 #   nxvk-portlib   installed-style tree to extract over $DEVKITPRO (portlibs/switch/...)
-#   nxvk-nros      every validation app in switch/smoke as a .nro
+#   (the .nro validation apps are only published in releases: Run workflow + version)
 name: Switch
 
 on:
@@ -48,6 +48,8 @@ jobs:
     name: Build (Vulkan + OpenGL)
     runs-on: ubuntu-24.04
     timeout-minutes: 300
+    permissions:
+      contents: write   # only used by the release steps
 
     steps:
       - name: Free disk space
@@ -65,6 +67,8 @@ jobs:
 
       - name: Build toolchain image
         uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false   # no .dockerbuild artifact
         with:
           context: switch/docker
           tags: ${{ env.IMAGE }}
@@ -130,13 +134,6 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-      - name: Upload .nros
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxvk-nros
-          path: switch/smoke/out/*.nro
-          if-no-files-found: error
-
       - name: Upload build logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -148,26 +145,15 @@ jobs:
             switch/build/cross-zink/meson-logs/
           if-no-files-found: ignore
 
-  release:
-    needs: build
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'workflow_dispatch' && inputs.version != ''
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
+      # The .nros are only published with a release, never as a run artifact.
       - name: Package release assets
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
         run: |
-          cd artifacts
-          (cd nxvk-portlib && zip -qr "../../nxvk-portlib-v${{ inputs.version }}.zip" .)
-          (cd nxvk-nros    && zip -qr "../../nxvk-nros-v${{ inputs.version }}.zip" .)
+          (cd dist && zip -qr "../nxvk-portlib-v${{ inputs.version }}.zip" .)
+          (cd switch/smoke/out && zip -q "$GITHUB_WORKSPACE/nxvk-nros-v${{ inputs.version }}.zip" *.nro)
 
       - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: "v${{ inputs.version }}"
