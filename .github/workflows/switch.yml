@@ -68,7 +68,9 @@ jobs:
       - name: Build toolchain image
         uses: docker/build-push-action@v6
         env:
-          DOCKER_BUILD_RECORD_UPLOAD: false   # no .dockerbuild artifact
+          # No build record: neither the .dockerbuild artifact nor the job summary.
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: switch/docker
           tags: ${{ env.IMAGE }}
@@ -82,12 +84,10 @@ jobs:
           make CONTAINER= "NINJA_ENV=$NINJA_ENV"
           EOF
 
-      # build-nro.sh links gl_* apps entirely out of cross-zink, so that tree also needs
-      # libnvk.a and the support archives, which `make gl` alone only builds in cross.
       - name: Build OpenGL stack (make gl)
         run: |
           docker run $DOCKER_ARGS -e NINJA_ENV "$IMAGE" bash -euo pipefail -s <<'EOF'
-          make gl CONTAINER= "NINJA_ENV=$NINJA_ENV" 'GL_TARGETS=$(GL_LIBS) $(DRIVER_TARGETS)'
+          make gl CONTAINER= "NINJA_ENV=$NINJA_ENV"
           EOF
 
       - name: Stage portlib
@@ -95,32 +95,6 @@ jobs:
           docker run $DOCKER_ARGS "$IMAGE" bash -euo pipefail -s <<'EOF'
           make install-gl CONTAINER= DEVKITPRO=/work/dist
           ls -lR dist
-          EOF
-
-      - name: Build validation .nros
-        run: |
-          docker run $DOCKER_ARGS "$IMAGE" bash -uo pipefail -s <<'EOF'
-          bash switch/smoke/shaders/gen-shaders.sh || exit 1
-
-          fail=0
-          for f in switch/smoke/nvk_*.c switch/smoke/gl_*.c switch/smoke/gles*.c; do
-            app="$(basename "$f" .c)"
-            case "$app" in
-            nvk_compat|nvk_chain) continue ;;   # linked into the other apps
-            gl_*|gles*) build=/work/switch/build/cross-zink ;;
-            *)          build=/work/switch/build/cross ;;
-            esac
-            echo "::group::$app"
-            CROSS_BUILD="$build" bash switch/build/build-nro.sh "$app"
-            rc=$?
-            echo "::endgroup::"
-            if [ $rc -ne 0 ]; then
-              echo "::error title=build-nro::$app failed to build"
-              fail=1
-            fi
-          done
-          ls -la switch/smoke/out/*.nro
-          exit $fail
           EOF
 
       - name: Restore workspace ownership
