@@ -1,0 +1,142 @@
+# Copyright © 2026 PalindromicBreadLoaf (palindromicbreadloaf@tuta.com)
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Cross-build NXVK (NVK + Zink for the Nintendo Switch) inside the toolchain image
+# from switch/docker, the same way `make image && make && make gl` does locally.
+#
+# Outputs (artifacts):
+#   nxvk-portlib   installed-style tree to extract over $DEVKITPRO (portlibs/switch/...)
+#   nxvk-nros      every validation app in switch/smoke as a .nro
+name: Switch
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: nxvk:ci
+  # The scripts hardcode /work, so the checkout must be mounted there.
+  # GIT_CONFIG_*: the container runs as root over a runner-owned checkout.
+  DOCKER_ARGS: >-
+    --rm -i
+    -v ${{ github.workspace }}:/work
+    -w /work
+    -e GIT_CONFIG_COUNT=1
+    -e GIT_CONFIG_KEY_0=safe.directory
+    -e GIT_CONFIG_VALUE_0=/work
+  # The Makefile runs ninja through `bash -lc`, and Debian's /etc/profile resets PATH
+  # for root, dropping the image's cargo/rustc. Put it back alongside the native tools.
+  NINJA_ENV: >-
+    cp -r switch/docker/cross-include/. /opt/switch-cross-include/ 2>/dev/null || true;
+    export PATH="/work/switch/build/native-tools/bin:/opt/rust/cargo/bin:$$PATH";
+
+jobs:
+  build:
+    name: Build (Vulkan + OpenGL)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: switch/docker
+          tags: ${{ env.IMAGE }}
+          load: true
+          cache-from: type=gha,scope=nxvk-toolchain
+          cache-to: type=gha,scope=nxvk-toolchain,mode=max
+
+      - name: Build Vulkan driver (make)
+        run: |
+          docker run $DOCKER_ARGS -e NINJA_ENV "$IMAGE" bash -euo pipefail -s <<'EOF'
+          make CONTAINER= "NINJA_ENV=$NINJA_ENV"
+          EOF
+
+      - name: Build OpenGL stack (make gl)
+        run: |
+          docker run $DOCKER_ARGS -e NINJA_ENV "$IMAGE" bash -euo pipefail -s <<'EOF'
+          make gl CONTAINER= "NINJA_ENV=$NINJA_ENV"
+          EOF
+
+      - name: Stage portlib
+        run: |
+          docker run $DOCKER_ARGS "$IMAGE" bash -euo pipefail -s <<'EOF'
+          make install-gl CONTAINER= DEVKITPRO=/work/dist
+          ls -lR dist
+          EOF
+
+      - name: Build validation .nros
+        run: |
+          docker run $DOCKER_ARGS "$IMAGE" bash -uo pipefail -s <<'EOF'
+          bash switch/smoke/shaders/gen-shaders.sh || exit 1
+
+          fail=0
+          for f in switch/smoke/nvk_*.c switch/smoke/gl_*.c switch/smoke/gles*.c; do
+            app="$(basename "$f" .c)"
+            case "$app" in
+            nvk_compat|nvk_chain) continue ;;   # linked into the other apps
+            gl_*|gles*) build=/work/switch/build/cross-zink ;;
+            *)          build=/work/switch/build/cross ;;
+            esac
+            echo "::group::$app"
+            CROSS_BUILD="$build" bash switch/build/build-nro.sh "$app"
+            rc=$?
+            echo "::endgroup::"
+            if [ $rc -ne 0 ]; then
+              echo "::error title=build-nro::$app failed to build"
+              fail=1
+            fi
+          done
+          ls -la switch/smoke/out/*.nro
+          exit $fail
+          EOF
+
+      - name: Restore workspace ownership
+        if: always()
+        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+
+      - name: Upload portlib
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxvk-portlib
+          path: dist/
+          if-no-files-found: error
+
+      - name: Upload .nros
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxvk-nros
+          path: switch/smoke/out/*.nro
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nxvk-logs
+          path: |
+            switch/build/native/meson-logs/
+            switch/build/cross/meson-logs/
+            switch/build/cross-zink/meson-logs/
+          if-no-files-found: ignore
