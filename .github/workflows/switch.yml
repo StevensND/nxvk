@@ -4,20 +4,13 @@
 # Cross-build NXVK (NVK + Zink for the Nintendo Switch) inside the toolchain image
 # from switch/docker, the same way `make image && make && make gl` does locally.
 #
-# Outputs (artifacts):
-#   nxvk-portlib   installed-style tree to extract over $DEVKITPRO (portlibs/switch/...)
-#   (the .nro validation apps are only published in releases: Run workflow + version)
+# Build check only: nothing is uploaded as an artifact or published as a release.
 name: Switch
 
 on:
   push:
   pull_request:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 'Release version. Leave it empty to avoid publishing a release.'
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -48,8 +41,6 @@ jobs:
     name: Build (Vulkan + OpenGL)
     runs-on: ubuntu-24.04
     timeout-minutes: 300
-    permissions:
-      contents: write   # only used by the release steps
 
     steps:
       - name: Free disk space
@@ -122,44 +113,3 @@ jobs:
           ls -la switch/smoke/out/*.nro
           exit $fail
           EOF
-
-      - name: Restore workspace ownership
-        if: always()
-        run: sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
-
-      - name: Upload portlib
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxvk-portlib
-          path: dist/
-          if-no-files-found: error
-
-      - name: Upload build logs
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxvk-logs
-          path: |
-            switch/build/native/meson-logs/
-            switch/build/cross/meson-logs/
-            switch/build/cross-zink/meson-logs/
-          if-no-files-found: ignore
-
-      # The .nros are only published with a release, never as a run artifact.
-      - name: Package release assets
-        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
-        run: |
-          (cd dist && zip -qr "../nxvk-portlib-v${{ inputs.version }}.zip" .)
-          (cd switch/smoke/out && zip -q "$GITHUB_WORKSPACE/nxvk-nros-v${{ inputs.version }}.zip" *.nro)
-
-      - name: Create GitHub Release
-        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: "v${{ inputs.version }}"
-          name: "nxvk v${{ inputs.version }}"
-          files: |
-            nxvk-portlib-v${{ inputs.version }}.zip
-            nxvk-nros-v${{ inputs.version }}.zip
-          draft: false
-          prerelease: false
